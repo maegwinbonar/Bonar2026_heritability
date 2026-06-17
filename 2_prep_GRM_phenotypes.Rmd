@@ -1,0 +1,505 @@
+---
+title: "Phenotype and GRM setup"
+author: "Maegwin Bonar"
+date: "2026-06-17"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = FALSE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+
+```
+
+### Introduction
+
+Prepare the migratory traits and the body size traits and plot distributions. Pepare GRM for use in animal models.
+
+### Prep Phenotypes
+
+```{r}
+# 01 - prep phenotype files and GRMs for models
+#input - phenotype csvs, grm.bin files
+#output - transformed cscs (as needed) and GRM in matrix form
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr', 'ggplot2', 'readr')
+lapply(libs, require, character.only = TRUE)
+
+##### Read in the data ----
+phys <- read.csv('input/phys_phenotypes.csv')
+mig <- read.csv('input/mig_phenotypes.csv')
+mig <- read.csv('input/mig_phenotypes_new.csv')
+ids <- read.csv('animal_filename.csv')
+
+# get the column names right
+names(mig)=c('filename', 'year', 'range', 'start', 'end', 'duration', 'distance', 'speed')
+names(mig)=c('filename', 'year', 'range', 'start', 'end', 'duration', 'distance', 'speed', 'speed2')
+# fix the filenames to be the same (run twice)
+mig$filename<- sub("-", "_", mig$filename)
+mig$filename<- sub("-", "_", mig$filename)
+# add the animal id to the migration file
+mig <- merge(x=ids,y=mig, 
+             by.x="filename", 
+             by.y='filename',
+             all.x=FALSE,
+             all.y=TRUE)
+
+str(phys)
+setDT(phys)
+str(mig)
+setDT(mig)
+
+##### Log transform Gaussian traits
+phys[, log_weight := log(weight)]
+phys[, log_hindleg := log(hind_leg)]
+phys[, log_chest := log(chest)]
+phys[, log_ifbf := log(ifbf)]
+
+mig[, log_distance := log(distance)]
+mig[, log_speed := log(speed)]
+mig[, log_speed2 := log(speed2)]
+
+# add age and hind leg length to migration
+physcov <- phys[, c('animal','age', 'log_hindleg')]
+mig <- merge(x=physcov,y=mig, 
+             by.x="animal", 
+             by.y='animal',
+             all.x=FALSE,
+             all.y=TRUE)
+
+##### Remove individuals from list
+#unique(phys$animal)
+#unique(indiv_to_rm$V1)
+
+#phys_rm <- phys[!phys$animal %in% indiv_to_rm,]
+#which(!phys$animal %in% phys_rm$animal)
+
+##### Save only relevant columns
+phys_tf <- phys[, c('animal', 'filename', 'deer_id', 'year', 'age', 'dec_capture',
+                    'log_weight', 'log_hindleg', 'log_chest', 'log_ifbf'), with=FALSE]
+
+mig_tf <- mig[, c('animal', 'filename', 'year', 'age', 'range', 'log_hindleg', 'start', 'end',
+                    'duration', 'log_distance', 'log_speed', 'log_speed2'), with=FALSE]
+#### write
+write.csv(phys_tf, 'input/phys_phenotypes_tf.csv', row.names=FALSE)
+write.csv(mig_tf, 'input/mig_phenotypes_tf_new.csv', row.names=FALSE)
+
+
+### read in new updated transformed file ----
+mig_phenotypes <- read_csv("input/mig_phenotypes_tf_new_movrate.csv")
+phys_phentotypes <- read_csv('input/phys_phenotypes_tf.csv')
+
+# read in grm ids for the unfiltered grm n=143
+grm_ids <- read_table("grm_ids")
+
+#filter phenotypes
+mig <- mig_phenotypes %>%
+  filter(animal %in% grm_ids$animal)
+
+phys <- phys_phentotypes %>%
+  filter(animal %in% grm_ids$animal)
+
+### Plot the distributions
+w<-ggplot(aes(x=log_weight), data = phys)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins = 15)+
+  xlab("log(weight)")+
+  ylab("count")+
+  theme_classic()
+print(w)
+png(paste("output/log_weight_dist_new", ".png", sep = ""),width=15,height=9,units="cm",res=150, pointsize = 3)
+print(w)
+dev.off()
+
+l<-ggplot(aes(x=log_hindleg), data = phys)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=8)+
+  xlab("log(hind leg length)")+
+  ylab("count")+
+  theme_classic()
+print(l)
+png(paste("output/log_hindleg_dist_new", ".png", sep = ""),width=15,height=9,units="cm",res=150, pointsize = 3)
+print(l)
+dev.off()
+
+c<-ggplot(aes(x=log_chest), data = phys)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("log(chest)")+
+  ylab("count")+
+  theme_classic()
+print(c)
+png(paste("output/chest_dist_new", ".png", sep = ""),width=15,height=9,units="cm",res=150, pointsize = 3)
+print(c)
+dev.off()
+
+ifbf<-ggplot(aes(x=log_ifbf), data = phys)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=12)+
+  xlab("log(ifbf)")+
+  ylab("count")+
+  theme_classic()
+print(ifbf)
+png(paste("output/log_ifbf_dist_new", ".png", sep = ""),width=15,height=9,units="cm",res=150, pointsize = 3)
+print(ifbf)
+dev.off()
+
+### migration
+
+start<-ggplot(aes(x=start), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("Day of year")+
+  ylab("count")+
+  xlim(c(50, 200))+
+  theme_classic()
+print(start)
+png(paste("output/start_dist_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(start)
+dev.off()
+
+end<-ggplot(aes(x=end), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("Day of year")+
+  ylab("count")+
+  xlim(c(50, 200))+
+  theme_classic()
+print(end)
+png(paste("output/end_dist_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(end)
+dev.off()
+
+dist<-ggplot(aes(x=log_distance), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("log(distance)")+
+  ylab("count")+
+  theme_classic()
+print(dist)
+png(paste("output/distance_dist_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(dist)
+dev.off()
+
+speed<-ggplot(aes(x=log_speed), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("log(speed)")+
+  ylab("count")+
+  theme_classic()
+print(speed)
+png(paste("output/speed_dist_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(speed)
+dev.off()
+
+speed2<-ggplot(aes(x=log_speed2), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("log(speed)")+
+  ylab("count")+
+  theme_classic()
+print(speed2)
+png(paste("output/speed_dist2_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(speed2)
+dev.off()
+
+dur<-ggplot(aes(x=duration), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=18)+
+  xlab("Duration (# of days)")+
+  ylab("count")+
+  theme_classic()
+print(dur)
+png(paste("output/duration_dist_new", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(dur)
+dev.off()
+
+mar_speed<-ggplot(aes(x=log_mar_speed), data = mig)+
+  geom_bar(stat="bin", fill = '#2c7fb8', colour = 'black', bins=15)+
+  xlab("Average March Movement Rate log(speed)")+
+  ylab("count")+
+  theme_classic()
+print(mar_speed)
+png(paste("output/avg_march_mov_rate", ".png", sep = ""),width=15,height=6,units="cm",res=150, pointsize = 3)
+print(mar_speed)
+dev.off()
+
+```
+
+### Prep GRM
+
+```{r}
+# 02 - prep GRMs for models
+#input - grm.bin files
+#output - GRM in matrix form and inverted for MCMCglmm use
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr','OmicKriging', 'gplots', 'MCMCglmm', 'MasterBayes', 'nadiv',
+          'igraph', 'Matrix', 'gap', 'mbend', 'matrixcalc', 'AGHmatrix', 'hglm', 'ggplot2',
+          'boot','reshape2')
+lapply(libs, require, character.only = TRUE)
+
+##### Functions ----
+ReadGRMBin=function(prefix, AllN=F, size=4){
+  sum_i=function(i){
+    return((1+i)*i/2)
+  }
+  
+  BinFileName=paste(prefix,".grm.bin",sep="")
+  NFileName=paste(prefix,".grm.N.bin",sep="")
+  IDFileName=paste(prefix,".grm.id",sep="")
+  id = read.table(IDFileName)
+  n=dim(id)[1]
+  BinFile=file(BinFileName, "rb");
+  grm=readBin(BinFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  NFile=file(NFileName, "rb");
+  if(AllN==T){
+    N=readBin(NFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  }
+  else N=readBin(NFile, n=1, what=numeric(0), size=size)
+  i=sapply(1:n, sum_i)
+  return(list(diag=grm[i], off=grm[-i], id=id, N=N))
+}
+
+
+##### Read in the data ----
+# GRMs
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm", 
+                        pattern="*.grm.bin", full.names = T)
+
+fileid <- substr(filenames,42,nchar(filenames)-8)
+# get the base name
+grmFileBase <- lapply(filenames, function(x) substr(x,1, nchar(x) - 4))
+# use the read_GRMBin function to read in grms
+GRM_90 <- lapply(grmFileBase, function(x) read_GRMBin(x))
+# make them matrices
+GRM_90.matrix <- lapply(GRM_90, as.matrix)
+names(GRM_90.matrix) <- fileid
+#fix rownames
+rownames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[1]])))
+colnames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[1]])))
+rownames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[2]])))
+colnames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[2]])))
+rownames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[3]])))
+colnames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[3]])))
+
+# Check if it is positive-definite, if not bend it
+is.positive.definite(GRM.matrix[[1]])
+
+is.positive.definite(GRM.matrix[[2]])
+GRM.bend_nr0.1=bend(GRM.matrix[[2]])
+
+is.positive.definite(GRM.matrix[[3]])
+GRM.bend_unf=bend(GRM.matrix[[3]])
+
+# Inverse
+Ginv_nr0.05<-as(solve(GRM.matrix[[1]]),"dgCMatrix") 
+colnames(Ginv_nr0.05)<-rownames(Ginv_nr0.05)
+
+Ginv_nr0.1<-as(solve(GRM.bend_nr0.1$bent),"dgCMatrix") 
+colnames(Ginv_nr0.1)<-rownames(Ginv_nr0.1)
+
+Ginv_unf<-as(solve(GRM.bend_unf$bent),"dgCMatrix") 
+colnames(Ginv_unf)<-rownames(Ginv_unf)
+
+###### Summary table for matrices ----
+uf.list <- list()
+uf.df <- vector("list", length(filenames))
+
+for(i in 1:length(filenames)){
+  # read in the grm list of 4 
+  df.list <- list()
+  df.list <- ReadGRMBin(prefix = substr(filenames[i],1,nchar(filenames[i])-8), AllN = T)
+  
+  # get name
+  name <- substr(filenames[i],42,nchar(filenames[i])-8)
+  off <- data.table(df.list$off)
+  diag <- data.table(df.list$diag)
+  N <- max(df.list$N)
+  id <- length(df.list$id$V2)
+  
+  moff <- mean(off$V1)
+  mdiag <- mean(diag$V1)
+  voff <- var(off$V1)
+  vdiag <- var(diag$V1)
+  
+  df <- data.table(name, id, N, moff, voff, mdiag, vdiag)
+  names(df) <- c('GRM', 'N', 'SNPs', 'mean off', 'var off', "mean diagonal", 'var diagonal')
+  
+  uf.df[[i]] <- df
+  
+}
+
+ufdf <- do.call('rbind', uf.df)
+
+###### Plot distributions
+df_nr0.05<-melt(GRM_90.matrix[[1]])
+setDT(df_nr0.05)
+
+# get off values
+off <- data.table(df_nr0.05[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  theme_classic()
+
+png(paste("output/df_nr0.05_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p1)
+dev.off()
+
+df_nr0.1<-melt(GRM_90.matrix[[2]])
+setDT(df_nr0.1)
+# get off values
+off <- data.table(df_nr0.1[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  theme_classic()
+
+png(paste("output/df_nr0.1_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p1)
+dev.off()
+
+df_unf<-melt(GRM_90.matrix[[3]])
+setDT(df_unf)
+# get off values
+off <- data.table(df_unf[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab(NULL)+
+  xlab(NULL)+
+  theme_classic()
+
+p2 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#2c7fb8')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  coord_cartesian(ylim=c(0, 50))+
+  theme_classic()
+
+p3<- p2 + annotation_custom(ggplotGrob(p1), xmin = 0.2, xmax = 0.6, 
+                            ymin = 10, ymax = 50)
+png(paste("output/indrmdf_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p3)
+dev.off()
+
+#### Individuals removed diagonal <1.2
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm_may23", 
+                        pattern="*.grm.bin", full.names = T)
+
+fileid <- substr(filenames,42,nchar(filenames)-8)
+# get the base name
+grmFileBase <- lapply(filenames, function(x) substr(x,1, nchar(x) - 4))
+# use the read_GRMBin function to read in grms
+GRM_90 <- lapply(grmFileBase, function(x) read_GRMBin(x))
+# make them matrices
+GRM_90.matrix <- lapply(GRM_90, as.matrix)
+names(GRM_90.matrix) <- fileid
+#fix rownames
+rownames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[1]])))
+colnames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[1]])))
+rownames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[2]])))
+colnames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[2]])))
+rownames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[3]])))
+colnames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[3]])))
+
+
+indrm.list <- list()
+indrm.df <- vector("list", length(filenames))
+
+for(i in 1:length(filenames)){
+  # read in the grm list of 4 
+  df.list <- list()
+  df.list <- ReadGRMBin(prefix = substr(filenames[i],1,nchar(filenames[i])-8), AllN = T)
+  
+  # get name
+  name <- substr(filenames[i],42,nchar(filenames[i])-8)
+  off <- data.table(df.list$off)
+  diag <- data.table(df.list$diag)
+  N <- max(df.list$N)
+  id <- length(df.list$id$V2)
+  
+  moff <- mean(off$V1)
+  mdiag <- mean(diag$V1)
+  voff <- var(off$V1)
+  vdiag <- var(diag$V1)
+  
+  df <- data.table(name, id, N, moff, voff, mdiag, vdiag)
+  names(df) <- c('GRM', 'N', 'SNPs', 'mean off', 'var off', "mean diagonal", 'var diagonal')
+  
+  indrm.df[[i]] <- df
+  
+}
+
+indrmdf <- do.call('rbind', indrm.df)
+###### Plot distributions
+indrmdf_nr0.05<-melt(GRM_90.matrix[[1]])
+setDT(indrmdf_nr0.05)
+
+# get off values
+off <- data.table(indrmdf_nr0.05[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  theme_classic()
+
+png(paste("output/indrmdf_nr0.05_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p1)
+dev.off()
+
+indrmdf_nr0.1<-melt(GRM_90.matrix[[2]])
+setDT(indrmdf_nr0.1)
+# get off values
+off <- data.table(indrmdf_nr0.1[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  theme_classic()
+
+png(paste("output/indrmdf_nr0.1_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p1)
+dev.off()
+
+indrmdf_unf<-melt(GRM_90.matrix[[3]])
+setDT(indrmdf_unf)
+# get off values
+off <- data.table(indrmdf_unf[Var1!=Var2, value])
+
+p1 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#41B6C4')+
+  ylab(NULL)+
+  xlab(NULL)+
+  theme_classic()
+
+p2 <-ggplot(aes(x=V1), data = off)+
+  geom_histogram(bins=100, colour='black', fill = '#2c7fb8')+
+  ylab("Count")+
+  xlab("Relatedness")+
+  coord_cartesian(ylim=c(0, 50))+
+  theme_classic()
+
+p3<- p2 + annotation_custom(ggplotGrob(p1), xmin = 0.2, xmax = 0.6, 
+                                        ymin = 10, ymax = 50)
+png(paste("output/indrmdf_grm_bar", ".png", sep = ""),width=8.79,height=7.26,units="cm",res=150, pointsize = 3)
+print(p3)
+dev.off()
+
+# Number of pairs out of 20449 that were higher than 0.1
+sum(off$V1 > 0.1)
+#104
+```
+
