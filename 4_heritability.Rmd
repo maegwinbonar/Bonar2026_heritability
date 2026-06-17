@@ -1,0 +1,994 @@
+---
+title: "Calculating heritability"
+author: "Maegwin Bonar"
+date: "2026-06-17"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = FALSE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+
+```
+
+### Introduction
+
+Narrow sense heritability conditional on fixed effects was estimated as h2 = VA/(VA + VPE + VR + Vfixed) and the permanent environmental effect conditional on fixed effects as pe2 = VPE/(VA + VPE + VR + Vfixed). We measured individual repeatability as the ratio of among-individual variance (genetic and nongenetic) over the total phenotypic variance ind2 = VA+VPE/ (VA + VPE + VR+ Vfixed) (Nakagawa & Schielzeth, 2010). Finally, we estimated evolvability for each migration trait (IA) (Hansen et al., 2011; Houle, 1992). Evolvability defined as the mean standardized proportion of additive genetic variance, was calculated as IA = VA/m2, where m is the trait mean (Hansen et al., 2011). 
+
+
+### Load workspace and functions
+
+```{r}
+# 04 - get model output and heritability estimates from mcmcglmm chains
+#input - mcmcglmm.RData workspace saved from step 03
+#output - heritabiltiy estimates and model ouputs
+
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr','OmicKriging', 'gplots', 'MCMCglmm', 'MasterBayes', 'nadiv',
+          'igraph', 'Matrix', 'gap', 'mbend', 'matrixcalc', 'AGHmatrix', 'hglm', 'ggplot2',
+          'boot','reshape2', 'parallel', 'readxl', 'QGglmm', 'matrixStats', 'tibble')
+
+lapply(libs, require, character.only = TRUE)
+
+#### Functions ----
+ReadGRMBin=function(prefix, AllN=F, size=4){
+  sum_i=function(i){
+    return((1+i)*i/2)
+  }
+  
+  BinFileName=paste(prefix,".grm.bin",sep="")
+  NFileName=paste(prefix,".grm.N.bin",sep="")
+  IDFileName=paste(prefix,".grm.id",sep="")
+  id = read.table(IDFileName)
+  n=dim(id)[1]
+  BinFile=file(BinFileName, "rb");
+  grm=readBin(BinFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  NFile=file(NFileName, "rb");
+  if(AllN==T){
+    N=readBin(NFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  }
+  else N=readBin(NFile, n=1, what=numeric(0), size=size)
+  i=sapply(1:n, sum_i)
+  return(list(diag=grm[i], off=grm[-i], id=id, N=N))
+}
+
+
+##### load workspace ----
+load("~/Dropbox/Shafer Lab/RADseq/mig_update.RData")
+load("~/Dropbox/Shafer Lab/RADseq/phys_update.RData")
+
+##### Model outputs
+
+summaryOfModels=function(grm, grm.name, name){
+# Fixed effects
+fixed <- lapply(grm, function(m) m$Sol) # Sol = fixed effects
+fixed <- do.call(mcmc.list, fixed)
+fixed_all <- do.call(rbind, fixed)
+
+mean_fixed <- colMeans(fixed_all)
+quantiles_fixed <- t(colQuantiles(fixed_all, probs = c(0.025, 0.975)))
+
+summary_fixed <- cbind(
+  estimate = mean_fixed,
+  t(quantiles_fixed),
+  trait = paste0(grm.name, "_", name)
+)
+
+#a <- summary(fixed)
+
+# Random effects
+random <- lapply(grm, function(m) m$VCV) # VCV = variance
+random <- do.call(mcmc.list, random)
+
+b <- summary(random)
+
+# Gelman Rubed diagnostics
+c <- gelman.diag(random)
+d <- gelman.diag(fixed)
+
+# Autocorrelation of diagonals
+e <- autocorr.diag(random)
+f <- autocorr.diag(fixed)
+
+#return(list(fixed, random, mean_fixed, quantiles_fixed,  b, c, d, e, f))
+return(list(summary_fixed, b, c, d, e, f))
+
+}
+
+propVarRandom=function(grm, grm.name, name){
+  
+  # Random effects
+  random <- lapply(grm, function(m) m$VCV) # VCV = variance
+  random_mcmc_list <- do.call(mcmc.list, random)
+  
+  sol <- lapply(grm, function(m) m$Sol)
+  sol_all <- do.call(rbind, sol)
+  
+  # # variance due to fixed effects
+  pred <- as.matrix(grm[[1]]$X) %*% t(sol_all)  # predictions from fixed effects
+  V_fixed <- apply(pred, 2, var)  
+  
+  # rbind all chains into one large posterior sample
+  vcv_all <- do.call(rbind, random_mcmc_list)
+  
+  VA  <- vcv_all[,"id"]
+  VPE <- vcv_all[,"pe"]
+  VR  <- vcv_all[,"units"]
+  
+  # total
+  V_total_cond <- VA + VPE + VR + V_fixed
+  # proportions of variance
+  prop_VA  <- VA  / V_total_cond
+  prop_VPE <- VPE / V_total_cond
+  prop_VR  <- VR  / V_total_cond
+  prop_fixed <- V_fixed / V_total_cond
+
+  #summary
+  summary_df <- data.frame(
+    grm = c(paste0(grm.name, "_", name)),
+    effect = c("id", "pe", "units", "fixed"),
+    mean   = c(mean(prop_VA), mean(prop_VPE), mean(prop_VR), mean(prop_fixed)),
+    median = c(median(prop_VA), median(prop_VPE), median(prop_VR), median(prop_fixed)),
+    lower  = c(quantile(prop_VA, 0.025),
+               quantile(prop_VPE, 0.025),
+               quantile(prop_VR, 0.025),
+               quantile(prop_fixed, 0.025)),
+    upper  = c(quantile(prop_VA, 0.975),
+               quantile(prop_VPE, 0.975),
+               quantile(prop_VR, 0.975),
+               quantile(prop_fixed, 0.975))
+  )
+  return(summary_df)
+}
+
+propVarNoPE=function(grm, grm.name, name){
+  
+  # Random effects
+  random <- lapply(grm, function(m) m$VCV) # VCV = variance
+  random_mcmc_list <- do.call(mcmc.list, random)
+  
+  sol <- lapply(grm, function(m) m$Sol)
+  sol_all <- do.call(rbind, sol)
+  
+  # # variance due to fixed effects
+  pred <- as.matrix(grm[[1]]$X) %*% t(sol_all)  # predictions from fixed effects
+  V_fixed <- apply(pred, 2, var)  
+  
+  # rbind all chains into one large posterior sample
+  vcv_all <- do.call(rbind, random_mcmc_list)
+  
+  VA  <- vcv_all[,"id"]
+  VR  <- vcv_all[,"units"]
+  
+  # total
+  V_total_cond <- VA + VR + V_fixed
+  # proportions of variance
+  prop_VA  <- VA  / V_total_cond
+  prop_VR  <- VR  / V_total_cond
+  prop_fixed <- V_fixed / V_total_cond
+  
+  #summary
+  summary_df <- data.frame(
+    grm = c(paste0(grm.name, "_", name)),
+    effect = c("id", "units", "fixed"),
+    mean   = c(mean(prop_VA),  mean(prop_VR), mean(prop_fixed)),
+    median = c(median(prop_VA), median(prop_VR), median(prop_fixed)),
+    lower  = c(quantile(prop_VA, 0.025),
+               quantile(prop_VR, 0.025),
+               quantile(prop_fixed, 0.025)),
+    upper  = c(quantile(prop_VA, 0.975),
+               quantile(prop_VR, 0.975),
+               quantile(prop_fixed, 0.975))
+  )
+  return(summary_df)
+}
+
+propVarRaw=function(grm, grm.name, name){
+  
+  # Random effects
+  random <- lapply(grm, function(m) m$VCV) # VCV = variance
+  random_mcmc_list <- do.call(mcmc.list, random)
+  
+  sol <- lapply(grm, function(m) m$Sol)
+  sol_all <- do.call(rbind, sol)
+  
+  # # variance due to fixed effects
+  pred <- as.matrix(grm[[1]]$X) %*% t(sol_all)  # predictions from fixed effects
+  V_fixed <- apply(pred, 2, var)  
+  
+  # rbind all chains into one large posterior sample
+  vcv_all <- do.call(rbind, random_mcmc_list)
+  
+  VA  <- vcv_all[,"id"]
+  VPE <- vcv_all[,"pe"]
+  VR  <- vcv_all[,"units"]
+  
+  # total
+  V_total_cond <- VA + VPE + VR + V_fixed
+  # proportions of variance
+  prop_VA  <- VA  / V_total_cond
+  prop_VPE <- VPE / V_total_cond
+  prop_VR  <- VR  / V_total_cond
+  prop_fixed <- V_fixed / V_total_cond
+  
+  return(list(prop_VA, prop_VPE, prop_VR, prop_fixed))
+}
+
+```
+
+
+### Summary of models and proportion of variance for body size traits
+
+```{r}
+# Weight
+summary_weight <- list()
+for (i in 1:length(grm90_chains_weight)){
+  summary_weight[[i]] <- summaryOfModels(grm = grm90_chains_weight[[i]], 
+                                         grm.name = 'grm90_chains_weight',
+                                         name = i)
+}
+
+summary_weight_df <- summary_weight %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# Hindleg
+summary_hleg <- list()
+for (i in 1:length(grm90_chains_hleg)){
+  summary_hleg[[i]] <- summaryOfModels(grm = grm90_chains_hleg[[i]], 
+                                         grm.name = 'grm90_chains_hleg',
+                                         name = i)
+}
+
+summary_hleg_df <- summary_hleg %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+# Chest
+summary_chest <- list()
+for (i in 1:length(grm90_chains_chest)){
+  summary_chest[[i]] <- summaryOfModels(grm = grm90_chains_chest[[i]], 
+                                         grm.name = 'grm90_chains_chest',
+                                         name = i)
+}
+
+summary_chest_df <- summary_chest %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# IFBF
+summary_ifbf <- list()
+for (i in 1:length(grm90_chains_ifbf)){
+  summary_ifbf[[i]] <- summaryOfModels(grm = grm90_chains_ifbf[[i]], 
+                                         grm.name = 'grm90_chains_ifbf',
+                                         name = i)
+}
+
+summary_ifbf_df <- summary_ifbf %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+summary_body_all <- rbind(summary_weight_df,summary_chest_df, summary_hleg_df, summary_ifbf_df)
+
+write.csv(summary_body_all, "output/summary_fixed_body_all.csv")
+
+#### Proportion of Variance ---------
+
+# chest
+propvar_chest<-list()
+for (i in 1:length(grm90_chains_chest)){
+  propvar_chest[[i]] <- propVarNoPE(grm = grm90_chains_chest[[i]], 
+                                      grm.name = 'grm90_chains_chest',
+                                      name = i)
+}
+propvar_chest_df <- propvar_chest %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# hindleg
+propvar_hleg<-list()
+for (i in 1:length(grm90_chains_hleg)){
+  propvar_hleg[[i]] <- propVarNoPE(grm = grm90_chains_hleg[[i]], 
+                                    grm.name = 'grm90_chains_hleg',
+                                    name = i)
+}
+propvar_hleg_df <- propvar_hleg %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# ifbf
+propvar_ifbf<-list()
+for (i in 1:length(grm90_chains_ifbf)){
+  propvar_ifbf[[i]] <- propVarNoPE(grm = grm90_chains_ifbf[[i]], 
+                                    grm.name = 'grm90_chains_ifbf',
+                                    name = i)
+}
+propvar_ifbf_df <- propvar_ifbf %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# weight
+propvar_weight<-list()
+for (i in 1:length(grm90_chains_weight)){
+  propvar_weight[[i]] <- propVarNoPE(grm = grm90_chains_weight[[i]], 
+                                    grm.name = 'grm90_chains_weight',
+                                    name = i)
+}
+propvar_weight_df <- propvar_weight %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+propvar_body <- rbind(propvar_chest_df, propvar_hleg_df, propvar_ifbf_df, propvar_weight_df)
+
+write.csv(propvar_body, "output/propvar_body.csv")
+
+
+```
+
+
+### Summary of models and proportion of variance for migration traits
+
+```{r}
+
+# start
+summary_start<- list()
+for (i in 1:length(grm90_chains_start)){
+  summary_start[[i]] <- summaryOfModels(grm = grm90_chains_start[[i]], 
+                                       grm.name = 'grm90_chains_start',
+                                       name = i)
+}
+summary_start_df <- summary_start %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for start
+propvar_start<-list()
+for (i in 1:length(grm90_chains_start)){
+  propvar_start[[i]] <- propVarRandom(grm = grm90_chains_start[[i]], 
+                                        grm.name = 'grm90_chains_start',
+                                        name = i)
+}
+propvar_start_df <- propvar_start %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# end
+summary_end<- list()
+for (i in 1:length(grm90_chains_end)){
+  summary_end[[i]] <- summaryOfModels(grm = grm90_chains_end[[i]], 
+                                        grm.name = 'grm90_chains_end',
+                                        name = i)
+}
+
+summary_end_df <- summary_end %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for end
+propvar_end<-list()
+for (i in 1:length(grm90_chains_end)){
+  propvar_end[[i]] <- propVarRandom(grm = grm90_chains_end[[i]], 
+                                      grm.name = 'grm90_chains_end',
+                                      name = i)
+}
+propvar_end_df <- propvar_end %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+# speed (migratory)
+summary_speed<- list()
+for (i in 1:length(grm90_chains_speed_dist)){
+  summary_speed[[i]] <- summaryOfModels(grm = grm90_chains_speed_dist[[i]], 
+                                      grm.name = 'grm90_chains_speed_dist',
+                                      name = i)
+}
+
+summary_speed_df <- summary_speed %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for speed (migratory)
+propvar_speed<-list()
+for (i in 1:length(grm90_chains_speed_dist)){
+  propvar_speed[[i]] <- propVarRandom(grm = grm90_chains_speed_dist[[i]], 
+                                      grm.name = 'grm90_chains_speed_dist',
+                                      name = i)
+}
+propvar_speed_df <- propvar_speed %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# duration
+summary_duration<- list()
+for (i in 1:length(grm90_chains_duration)){
+  summary_duration[[i]] <- summaryOfModels(grm = grm90_chains_duration[[i]], 
+                                      grm.name = 'grm90_chains_duration',
+                                      name = i)
+}
+
+summary_duration_df <- summary_duration %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for duration
+propvar_duration<-list()
+for (i in 1:length(grm90_chains_duration)){
+  propvar_duration[[i]] <- propVarRandom(grm = grm90_chains_duration[[i]], 
+                                      grm.name = 'grm90_chains_duration',
+                                      name = i)
+}
+propvar_duration_df <- propvar_duration %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# distance
+summary_dist<- list()
+for (i in 1:length(grm90_chains_dist)){
+  summary_dist[[i]] <- summaryOfModels(grm = grm90_chains_dist[[i]], 
+                                      grm.name = 'grm90_chains_dist',
+                                      name = i)
+}
+
+summary_dist_df <- summary_dist %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for distance
+propvar_dist<-list()
+for (i in 1:length(grm90_chains_dist)){
+  propvar_dist[[i]] <- propVarRandom(grm = grm90_chains_dist[[i]], 
+                                      grm.name = 'grm90_chains_dist',
+                                      name = i)
+}
+propvar_dist_df <- propvar_dist %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# March movement rate (non-migratory)
+summary_mar_movrate<- list()
+for (i in 1:length(grm90_chains_mar_mov)){
+  summary_mar_movrate[[i]] <- summaryOfModels(grm = grm90_chains_mar_mov[[i]], 
+                                       grm.name = 'grm90_chains_mar_mov',
+                                       name = i)
+}
+
+summary_marmov_df <- summary_mar_movrate %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# proportion of variance for non-migratory movement rate
+propvar_mar_mov<-list()
+for (i in 1:length(grm90_chains_mar_mov)){
+  propvar_mar_mov[[i]] <- propVarRandom(grm = grm90_chains_mar_mov[[i]], 
+                                      grm.name = 'grm90_chains_mar_mov',
+                                      name = i)
+}
+propvar_mar_mov_df <- propvar_mar_mov %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+summary_fixed_mig <- rbind(summary_start_df, summary_end_df, summary_dist_df, summary_duration_df,
+                           summary_speed_df, summary_marmov_df)
+
+write.csv(summary_fixed_mig, "output/summary_fixed_mig_all.csv")
+
+propvar_mig <- rbind(propvar_start_df, propvar_end_df, propvar_dist_df, propvar_duration_df,
+                     propvar_speed_df, propvar_mar_mov_df)
+
+write.csv(propvar_mig, "output/propvar_mig.csv")
+
+```
+
+### Heritability for body size traits
+
+```{r}
+getHeritabilityPhys = function(grm, grm.name, name){
+  
+  # Random effects
+  random <- lapply(grm, function(m) m$VCV) # VCV = variance
+  random <- do.call(mcmc.list, random)
+  
+  # variance due to fixed effects
+  predictions <- lapply(grm, function(m) as.matrix(m$X) %*% t(m$Sol))
+  fixedf_variance <- lapply(predictions, function (j) apply(j, MARGIN = 2, var))
+  
+  # make a dataframe of all the id and untis from all 4 chains
+  random_out<-do.call(rbind.data.frame, random)
+  fixed_eff <- data.frame(values = as.numeric(unlist(fixedf_variance)))
+  
+  ## Pull out variance components
+  h2 <- random_out$id /
+    (random_out$id + random_out$units + fixed_eff$values)
+  
+  # ind2 <- (random_out$year + random_out$id) /
+  #   (random_out$id + random_out$year + random_out$units)
+  
+  # pe2 <- random_out$year /
+  #   (random_out$id + random_out$year + random_out$units)
+  
+  h2_df <- data.frame(var = 'h2',
+                      median = median(h2),
+                      mean = mean(h2),
+                      lower = quantile(h2, 0.025),
+                      upper = quantile(h2, 0.975),
+                      grm = paste(grm.name, name, sep = "_"),
+                      stringsAsFactors = FALSE)
+  
+  # pe2_df <- data.frame(var = 'pe2',
+  #                     median = median(pe2),
+  #                     mean = mean(pe2),
+  #                     lower = quantile(pe2, 0.025),
+  #                     upper = quantile(pe2, 0.975),
+  #                     grm = paste(grm.name, name, sep = "_"),
+  #                     stringsAsFactors = FALSE)
+  # 
+  # ind2_df <- data.frame(var = 'ind2',
+  #                     median = median(ind2),
+  #                     mean = mean(ind2),
+  #                     lower = quantile(ind2, 0.025),
+  #                     upper = quantile(ind2, 0.975),
+  #                     grm = paste(grm.name, name, sep = "_"),
+  #                     stringsAsFactors = FALSE)
+  
+  #return(list(h2_df, pe2_df, ind2_df))
+  return(list(h2_df))
+  
+}
+
+# weight
+h2_weight <- list()
+for (i in 1:length(grm90_chains_weight)){
+  h2_weight[[i]] <- getHeritabilityPhys(grm = grm90_chains_weight[[i]], 
+                                         grm.name = 'grm90_chains_weight',
+                                         name = i)
+}
+
+nr0.05_weight <- do.call('rbind', h2_weight[[1]])
+nr0.1_weight <- do.call('rbind', h2_weight[[2]])
+unf_weight <- do.call('rbind', h2_weight[[3]])
+df_weight <- h2_weight %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# hindleg
+h2_hleg <- list()
+for (i in 1:length(grm90_chains_hleg)){
+  h2_hleg[[i]] <- getHeritabilityPhys(grm = grm90_chains_hleg[[i]], 
+                                    grm.name = 'grm90_chains_hleg',
+                                    name = i)
+}
+
+nr0.05_hleg <- do.call('rbind', h2_hleg[[1]])
+nr0.1_hleg <- do.call('rbind', h2_hleg[[2]])
+unf_hleg <- do.call('rbind', h2_hleg[[3]])
+df_hleg <- h2_hleg %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# chest
+h2_chest <- list()
+for (i in 1:length(grm90_chains_chest)){
+  h2_chest[[i]] <- getHeritabilityPhys(grm = grm90_chains_chest[[i]], 
+                                    grm.name = 'grm90_chains_chest',
+                                    name = i)
+}
+
+nr0.05_chest <- do.call('rbind', h2_chest[[1]])
+nr0.1_chest <- do.call('rbind', h2_chest[[2]])
+unf_chest <- do.call('rbind', h2_chest[[3]])
+df_chest <- h2_chest %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# IFBF
+h2_ifbf <- list()
+for (i in 1:length(grm90_chains_ifbf)){
+  h2_ifbf[[i]] <- getHeritabilityPhys(grm = grm90_chains_ifbf[[i]], 
+                                    grm.name = 'grm90_chains_ifbf',
+                                    name = i)
+}
+
+nr0.05_ifbf <- do.call('rbind', h2_ifbf[[1]])
+nr0.1_ifbf <- do.call('rbind', h2_ifbf[[2]])
+unf_ifbf <- do.call('rbind', h2_ifbf[[3]])
+df_ifbf <- h2_ifbf %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+df_phys <- rbind(df_weight, df_chest, df_hleg, df_ifbf)
+write.csv(df_phys, "output/h2_phys_update.csv")
+
+```
+
+### Heritability, repeatability, evolvability for migration traits
+
+```{r}
+
+getHeritabilityMig = function(grm, grm.name, name, trait){
+  
+  # Random effects
+  random <- lapply(grm, function(m) m$VCV) # VCV = variance
+  random <- do.call(mcmc.list, random)
+  
+  # make a dataframe of all the id and untis from all 4 chains
+  random_out<-do.call(rbind.data.frame, random)
+  
+  # # variance due to fixed effects
+  predictions <- lapply(grm, function(m) as.matrix(m$X) %*% t(m$Sol))
+  fixedf_variance <- lapply(predictions, function (j) apply(j, MARGIN = 2, var))
+  
+  # make a dataframe of all the id and untis from all 4 chains
+  random_out<-do.call(rbind.data.frame, random)
+  fixed_eff <- data.frame(values = as.numeric(unlist(fixedf_variance)))
+  
+  ## Pull out variance components
+  h2 <- random_out$id /
+    (random_out$id + random_out$pe + random_out$units + fixed_eff$values)
+  
+  # permanent environmental effects
+  pe2 <- (random_out$pe) /
+    (random_out$id + random_out$pe + random_out$units + fixed_eff$values)
+  
+  # repeatability
+  ind2 <- (random_out$id + random_out$pe) /
+    (random_out$id + random_out$pe + random_out$units + fixed_eff$values)
+  
+  #evolvability
+  ia <- random_out$id / (mean(na.omit(trait)))^2
+  
+  h2_df <- data.frame(var = 'h2',
+                      median = median(h2),
+                      mean = mean(h2),
+                      lower = quantile(h2, 0.025),
+                      upper = quantile(h2, 0.975),
+                      grm = paste(grm.name, name, sep = "_"),
+                      stringsAsFactors = FALSE)
+  
+  pe2_df <- data.frame(var = 'pe2',
+                       median = median(pe2),
+                       mean = mean(pe2),
+                       lower = quantile(pe2, 0.025),
+                       upper = quantile(pe2, 0.975),
+                       grm = paste(grm.name, name, sep = "_"),
+                       stringsAsFactors = FALSE)
+  
+  ind2_df <- data.frame(var = 'ind2',
+                        median = median(ind2),
+                        mean = mean(ind2),
+                        lower = quantile(ind2, 0.025),
+                        upper = quantile(ind2, 0.975),
+                        grm = paste(grm.name, name, sep = "_"),
+                        stringsAsFactors = FALSE)
+  
+  ia_df <- data.frame(var = 'ia',
+                        median = median(ia),
+                        mean = mean(ia),
+                        lower = quantile(ia, 0.025, na.rm=TRUE),
+                        upper = quantile(ia, 0.975, na.rm=TRUE),
+                        grm = paste(grm.name, name, sep = "_"),
+                        stringsAsFactors = FALSE)
+  
+  return(list(h2_df, pe2_df, ind2_df, ia_df))
+
+}
+
+
+# start time
+h2_start <- list()
+for (i in 1:length(grm90_chains_start)){
+  h2_start[[i]] <- getHeritabilityMig(grm = grm90_chains_start[[i]], 
+                                  grm.name = 'grm90_chains_start',
+                                  name = i,
+                                  trait = df_90[[i]]$start)
+}
+
+nr0.05_start <- do.call('rbind', h2_start[[1]])
+nr0.1_start <- do.call('rbind', h2_start[[2]])
+unf_start <- do.call('rbind', h2_start[[3]])
+df_start <- h2_start %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# end time
+h2_end <- list()
+for (i in 1:length(grm90_chains_end)){
+  h2_end[[i]] <- getHeritabilityMig(grm = grm90_chains_end[[i]], 
+                                   grm.name = 'grm90_chains_end',
+                                   name = i,
+                                   trait = df_90[[i]]$end)
+}
+
+nr0.05_end <- do.call('rbind', h2_end[[1]])
+nr0.1_end <- do.call('rbind', h2_end[[2]])
+unf_end <- do.call('rbind', h2_end[[3]])
+df_end <- h2_end %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+# speed (migratory)
+h2_speed <- list()
+for (i in 1:length(grm90_chains_speed_dist)){
+  h2_speed[[i]] <- getHeritabilityMig(grm = grm90_chains_speed_dist[[i]], 
+                                      grm.name = 'grm90_chains_speed_dist',
+                                      name = i,
+                                      trait = df_90[[i]]$log_speed2)
+}
+
+
+nr0.05_speed <- do.call('rbind', h2_speed[[1]])
+nr0.1_speed <- do.call('rbind', h2_speed[[2]])
+unf_speed <- do.call('rbind', h2_speed[[3]])
+df_speed <- h2_speed %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# march movement rate (non-migratory)
+h2_mar_mov <- list()
+for (i in 1:length(grm90_chains_mar_mov)){
+  h2_mar_mov[[i]] <- getHeritabilityMig(grm = grm90_chains_mar_mov[[i]], 
+                                      grm.name = 'grm90_chains_mar_mov',
+                                      name = i,
+                                      trait = df_90[[i]]$log_mar_speed)
+}
+
+df_mar_mov <- h2_mar_mov %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+# duration
+h2_duration <- list()
+for (i in 1:length(grm90_chains_duration)){
+  h2_duration[[i]] <- getHeritabilityMig(grm = grm90_chains_duration[[i]], 
+                                   grm.name = 'grm90_chains_duration',
+                                   name = i,
+                                   trait = df_90[[i]]$duration)
+}
+
+nr0.05_duration <- do.call('rbind', h2_duration[[1]])
+nr0.1_duration <- do.call('rbind', h2_duration[[2]])
+unf_duration <- do.call('rbind', h2_duration[[3]])
+df_duration <- h2_duration %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+# distance
+h2_dist <- list()
+for (i in 1:length(grm90_chains_dist)){
+  h2_dist[[i]] <- getHeritabilityMig(grm = grm90_chains_dist[[i]], 
+                                      grm.name = 'grm90_chains_dist',
+                                      name = i,
+                                     trait = df_90[[i]]$log_distance)
+}
+
+nr0.05_dist <- do.call('rbind', h2_dist[[1]])
+nr0.1_dist <- do.call('rbind', h2_dist[[2]])
+unf_dist <- do.call('rbind', h2_dist[[3]])
+df_dist <- h2_dist %>% 
+  lapply(as.data.frame) %>% 
+  bind_rows()
+
+
+df_mig <- rbind(df_start, df_end, df_dist, df_duration, df_speed, df_mar_mov)
+write.csv(df_mig, "output/h2_mig_update2.csv")
+
+```
+
+### Figures
+
+```{r}
+##### Figures ----
+
+# read in proportion of variance table
+propvar <- read_excel("propvar_table.xlsx", sheet = 1)
+propvar_body <- read_excel("propvar_table.xlsx", sheet = 2)
+
+propvar2 <- melt(as.data.table(propvar), id.vars = 'Trait')
+propvar2$variable <- factor(propvar2$variable, levels = c('4Fixed', '3VR', '2VPE', '1VA'))
+str(propvar2)
+
+propvar_body <- melt(as.data.table(propvar_body), id.vars = 'Trait')
+propvar_body$variable <- factor(propvar_body$variable, levels = c('4Fixed', '3VR', '2VPE', '1VA'))
+str(propvar_body)
+
+# Bar chart of proportion of variance
+traits_body <- c('Chest', 'Leg', 'IFBF', 'Wt')
+traits_mov <- c('Start', 'End', 'Dist', 'Dur', 'Mov Rate\n(mig)', 'Mov Rate\n(non-mig)')
+
+p<-ggplot(propvar2, aes(x = Trait, y = value, fill = variable)) +
+  geom_col(position = "fill", colour = 'black')+
+  xlab(NULL)+
+  ylab(NULL)+
+  theme(
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 16, colour = "black"),
+    axis.text.x = element_text(size=16, colour = "black"),
+    # legend.title = element_blank(),
+    legend.text = element_text(size = 16, colour = "black"),
+    axis.title.y = element_text(size = 18),
+    legend.title = element_text(size = 18)
+  )+
+  guides(fill=guide_legend(title="Effect"))+
+  scale_fill_manual(values=c("#DDCC77", "#88CCEE","#44AA99", '#117733'),
+                    labels = c('Fixed effects', 'Residual', 'Permanent environment', 'Additive genetic'))+
+  scale_x_discrete(labels = traits_mov)
+
+p
+
+png('output/propvar.png', height = 6, width = 10, units = "in", res = 400)
+print(p)
+dev.off()
+
+p_body<-ggplot(propvar_body, aes(x = Trait, y = value, fill = variable)) +
+  geom_col(position = "fill", colour = 'black')+
+  xlab(NULL)+
+  ylab(NULL)+
+  theme(
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, colour = "black"),
+    axis.text.x = element_text(size=12, colour = "black"),
+    # legend.title = element_blank(),
+    legend.text = element_text(size = 18, colour = "black"),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 20,  colour = "black")
+  )+
+  guides(fill=guide_legend(title="Proportion of Variance"))+
+  scale_fill_manual(values=c("#DDCC77", "#88CCEE", '#117733'),
+                    labels = c('Fixed Effects', 'Residual', 'Additive genetic'))+
+  scale_x_discrete(labels = traits_body)
+
+p_body
+
+png('output/propvar_body.png', height = 6, width = 8.5, units = "in", res = 400)
+print(p_body)
+dev.off()
+
+# Point and Ci plot of h2 and prop variance
+var_ci <- read_csv("output/propvar_mig_update_CI.csv")
+var_ci$var <- factor(var_ci$var, levels = c("id", "pe", "units", "fixed"))
+var_ci$trait <- factor(var_ci$trait, levels = c("start", "end", "distance", "duration",
+                                               "speed", "mar_mov"))
+
+propvar_ci <- ggplot(var_ci, aes(x = var, y = mean, colour = var)) +
+  geom_pointrange(
+    aes(ymin = lower, ymax = upper),
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ trait, ncol = 1, strip.position = "right",
+             labeller = as_labeller(c(
+               start = "Start",
+               end   = "End",
+               distance = "Distance",
+               duration = "Duration",
+               speed = "Movement rate\n(migration)",
+               mar_mov = "Movement rate\n(non-migratory)"
+             ))) +
+  labs(
+    x = "Variance component",
+    y = "Proportion of variance (posterior mean with 95% CI)"
+  ) +
+  theme_bw() +
+  scale_x_discrete(
+    labels = c(
+      id    = "Additive\ngenetic",
+      pe    = "Permanent\nenvironment",
+      units = "Residual",
+      fixed = "Fixed effects"
+    ))+
+  scale_colour_manual(values=c('#117733', "#44AA99", "#88CCEE","#DDCC77"))+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+png('output/propvar_ci_update.png', height = 8, width = 6, units = "in", res = 400)
+print(propvar_ci)
+dev.off()
+
+
+### GRM Figures
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm", pattern="*.grm.bin", full.names = T)
+uf.list <- list()
+uf.df <- vector("list", length(filenames))
+
+for(i in 1:length(filenames)){
+  # read in the grm list of 4 
+  uf.list <- list()
+  uf.list <- ReadGRMBin(prefix = substr(filenames[i],1,nchar(filenames[i])-8), AllN = T)
+  
+  # get name
+  name <- substr(filenames[i],44,nchar(filenames[i])-8)
+  off <- data.table(uf.list$off)
+  diag <- data.table(uf.list$diag)
+  N <- max(uf.list$N)
+  id <- length(uf.list$id$V2)
+  
+  moff <- mean(off$V1)
+  mdiag <- mean(diag$V1)
+  mindiag <- min(diag$V1)
+  maxdiag <- max(diag$V1)
+  voff <- var(off$V1)
+  vdiag <- var(diag$V1)
+  
+  df <- data.table(name, id, N, moff, voff, mdiag, vdiag, mindiag, maxdiag)
+  names(df) <- c('GRM', 'N', 'SNPs', 'mean off', 'var off', "mean diagonal", 'var diagonal', 
+                 'min diagonal', 'max diagonal')
+  
+  uf.df[[i]] <- df
+  
+}
+
+ufdf <- do.call('rbind', uf.df)
+ufdf
+
+grm<-melt(GRM_90[[3]])
+setDT(grm)
+off<-grm[Var1!=Var2,]
+diag<-grm[Var1==Var2,]
+
+p1 <-ggplot(aes(x=value), data = off)+
+  geom_histogram(bins=100, colour='#332288', fill = '#332288')+
+  ylab(NULL)+
+  xlab(NULL)+
+  #ggtitle(paste(name, " SNPs = ", N, " N = ", id, ' mean off = ',
+  #round(moff, digits = 6), sep = ""))+
+  theme(
+    axis.text.x = element_text(size=12, colour = "black"),
+    axis.text.y = element_text(size=12, colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = 'black', fill = 'transparent'),
+    panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color=NA),
+  )
+
+p2 <-ggplot(aes(x=value), data = off)+
+  geom_histogram(bins=100, colour='#332288', fill = '#332288')+
+  geom_vline(xintercept = 0.1, colour = 'red')+
+  ylab(NULL)+
+  xlab(NULL)+
+  coord_cartesian(ylim=c(0, 50))+
+  theme(
+    axis.text.x = element_text(size=18, colour = "black"),
+    axis.text.y = element_text(size=18, colour = "black"),
+    axis.title = element_text(size=20, colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = 'black', fill = 'transparent'),
+    panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color=NA),
+  )
+
+p3 <-p2 + annotation_custom(ggplotGrob(p1), xmin = 0.2, xmax = 0.8, 
+                            ymin = 20, ymax = 50)
+p3
+
+png('output/grm_freq_line.png', height = 3.5, width = 6, units = "in", res = 400, bg='transparent')
+print(p3)
+dev.off()
+
+```
+
