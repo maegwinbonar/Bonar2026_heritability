@@ -1,3 +1,7 @@
+# R markdown / knitr cache
+*_cache/
+**/*_cache/
+
 # R session files
 .Rhistory
 .RData
