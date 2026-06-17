@@ -1,0 +1,33 @@
+---
+title: "Animal Models - Univariate and Bivariate"
+author: "Maegwin Bonar"
+date: "2026-06-17"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = FALSE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+
+```
+
+### Introduction
+
+We used the animal model approach to partition the phenotypic variance of migration (VP) into additive genetic variance (VA), permanent environmental effects (VPE) and residual variance (VR) such that VP = VA + VPE + VR conditional on any fixed effects. Table 1 in the manuscript summarizes the fixed and random effects for each animal model.
+
+To test for potential correlation between movement rate and hindleg length we fit a bivariate animal model (de Villemereuil, 2018) with age, year of migration, and log-transformed distance of migration route as fixed effects. Individual identity was included as a random effect in all the migration models to account for permanent environmental effects (de Villemereuil, 2018). 
+
