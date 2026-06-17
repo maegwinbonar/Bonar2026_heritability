@@ -31,3 +31,641 @@ We used the animal model approach to partition the phenotypic variance of migrat
 
 To test for potential correlation between movement rate and hindleg length we fit a bivariate animal model (de Villemereuil, 2018) with age, year of migration, and log-transformed distance of migration route as fixed effects. Individual identity was included as a random effect in all the migration models to account for permanent environmental effects (de Villemereuil, 2018). 
 
+### Body size traits
+
+```{r}
+#03 - run animal models using MCMCglmm
+#input - grm.bin files, phenotype files
+#output - GMCMCglmm  models
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr','OmicKriging', 'gplots', 'MCMCglmm', 'MasterBayes', 'nadiv',
+          'igraph', 'Matrix', 'gap', 'mbend', 'matrixcalc', 'AGHmatrix', 'hglm', 'ggplot2',
+          'boot','reshape2', 'parallel')
+lapply(libs, require, character.only = TRUE)
+
+##### Functions ----
+orderDfGrm=function(grm=grm,phen=phen, id=id){
+  #make a null dataframe
+  d=NULL
+  #get the ids of the GRM in the order they appear
+  gid=rownames(grm)
+  # get the ids from the id column in the phenotype file
+  id=as.character(id)
+  
+  # For loop for creating the new dataframe with the correct number of individuals
+  for(i in 1:length(gid)){
+    dtmp=c(gid[i],as.numeric(phen$log_weight[id==gid[i]]), as.numeric(phen$log_hindleg[id==gid[i]]), 
+           as.numeric(phen$log_chest[id==gid[i]]), as.numeric(phen$log_ifbf[id==gid[i]]), 
+           as.numeric(phen$age[id==gid[i]]), as.character(phen$year[id==gid[i]]), 
+           as.character(phen$dec_capture[id==gid[i]]))
+    d=rbind(d, dtmp)
+  }
+  
+  # save the dataframe
+  d=data.frame(d)
+  # get the column names right
+  names(d)=c("id","log_weight", "log_hindleg", "log_chest", "log_ifbf", "age","year","dec_capture")
+  
+  # set numeric variables
+  d$age <- as.numeric(d$age)
+  d$log_weight <- as.numeric(d$log_weight)
+  d$log_hindleg <- as.numeric(d$log_hindleg)
+  d$log_chest <- as.numeric(d$log_chest)
+  d$log_ifbf <- as.numeric(d$log_ifbf)
+  
+  return(d)
+}
+
+##### Read in the data ----
+# Phenotypes
+phys <- read.csv('input/phys_phenotypes_tf.csv')
+# make sure dependent variables are numeric
+str(phys)
+
+# GRMs - less than 90% individual missingness
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm", 
+                        pattern="*.grm.bin", full.names = T)
+
+fileid <- substr(filenames,42,nchar(filenames)-8)
+# get the base name
+grmFileBase <- lapply(filenames, function(x) substr(x,1, nchar(x) - 4))
+# use the read_GRMBin function to read in grms
+GRM_90 <- lapply(grmFileBase, function(x) read_GRMBin(x))
+# make them matrices
+GRM_90.matrix <- lapply(GRM_90, as.matrix)
+names(GRM_90.matrix) <- fileid
+#fix rownames
+rownames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[1]])))
+colnames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[1]])))
+rownames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[2]])))
+colnames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[2]])))
+rownames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[3]])))
+colnames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[3]])))
+
+# Check if it is positive-definite, if not bend it
+is.positive.definite(GRM_90.matrix[[1]])
+
+is.positive.definite(GRM_90.matrix[[2]])
+
+is.positive.definite(GRM_90.matrix[[3]])
+GRM_90.bend_unf=bend(GRM_90.matrix[[3]])
+
+# Inverse
+Ginv_90_nr0.05<-as(solve(GRM_90.matrix[[1]]),"dgCMatrix") 
+
+colnames(Ginv_90_nr0.05)<-rownames(Ginv_90_nr0.05)
+
+Ginv_90_nr0.1<-as(solve(GRM_90.matrix[[2]]),"dgCMatrix") 
+colnames(Ginv_90_nr0.1)<-rownames(Ginv_90_nr0.1)
+
+Ginv_90_unf<-as(solve(GRM_90.bend_unf$bent),"dgCMatrix") 
+colnames(Ginv_90_unf)<-rownames(Ginv_90_unf)
+
+# list the matrices in the corresponding order to the df
+Ginv_90_list <- list()
+Ginv_90_list <- list(Ginv_90_nr0.05, Ginv_90_nr0.1, Ginv_90_unf)
+
+#### Making the models -----
+
+# First make sure everything is in the right order and make a new data frame
+# Use the oderDfGrm function on the list of matrices
+
+# GRM 90
+df_90 <- list()
+df_90 <- lapply(GRM_90.matrix, function(x) orderDfGrm(grm = x, phen = phys, id = phys$animal))
+
+# GRM 95
+#df_95 <- list()
+#df_95 <- lapply(GRM_95.matrix, function(x) orderDfGrm(grm = x, phen = phys, id = phys$animal))
+
+#### Run the models ---
+
+# set priors
+prior <-list()
+prior <- list(
+  R = list(V=1, nu=0.002), 
+  G = list(G1 = list(V=1, nu=0.002)))
+
+# log weight
+# make an empty list to store the chains
+grm90_chains_weight <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_weight <- mclapply(1:4, function(i) {
+    MCMCglmm(log_weight ~ age + dec_capture + year, random=~id, family = "gaussian", 
+             prior = prior, ginverse = list(id=Ginv_90_list[[x]]), data = df_90[[x]], nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_weight[[x]] <- chains_weight
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed weight model', x, 'of', length(df_90),'\n')
+
+}
+
+# log hindleg
+# make an empty list to store the chains
+grm90_chains_hleg <- list()
+
+for (x in 1:length(df_90)){
+
+  # make the list of 4 chains of mcmc models per one grm
+  chains_hleg <- mclapply(1:4, function(i) {
+    MCMCglmm(log_hindleg ~ age + dec_capture + year, random=~id, family = "gaussian", 
+             prior = prior, ginverse = list(id=Ginv_90_list[[x]]), data = df_90[[x]], nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_hleg[[x]] <- chains_hleg
+  # name it the name of the df used
+  #names(grm90_chains_hleg[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed hindleg model', x, 'of', length(df_90),'\n')
+  
+}
+
+# log chest
+# make an empty list to store the chains
+grm90_chains_chest <- list()
+
+for (x in 1:length(df_90)){
+
+  # make the list of 4 chains of mcmc models per one grm
+  chains_chest <- mclapply(1:4, function(i) {
+    MCMCglmm(log_chest ~ age + dec_capture+ year, random=~id, family = "gaussian", 
+             prior = prior, ginverse = list(id=Ginv_90_list[[x]]), data = df_90[[x]], nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_chest[[x]] <- chains_chest
+  # name it the name of the df used
+  #names(grm90_chains_chest[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed chest model', x, 'of', length(df_90),'\n')
+  
+}
+
+# log ifbf
+# make an empty list to store the chains
+grm90_chains_ifbf <- list()
+
+for (x in 1:length(df_90)){
+
+  # make the list of 4 chains of mcmc models per one grm
+  chains_ifbf <- mclapply(1:4, function(i) {
+    MCMCglmm(log_ifbf ~ age + dec_capture + year, random=~id, family = "gaussian", 
+             prior = prior, ginverse = list(id=Ginv_90_list[[x]]), data = df_90[[x]], nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_ifbf[[x]] <- chains_ifbf
+  # name it the name of the df used
+  #names(grm90_chains_ifbf[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed ifbf model', x, 'of', length(df_90),'\n')
+
+}
+
+save.image(file="phys_update.RData")
+
+#END 
+
+```
+
+### Migration traits (univariate models)
+
+```{r}
+# 03 - run animal models using MCMCglmm
+#input - grm.bin files, phenotype files
+#output - GMCMCglmm  models
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr','OmicKriging', 'gplots', 'MCMCglmm', 'MasterBayes', 'nadiv',
+          'igraph', 'Matrix', 'gap', 'mbend', 'matrixcalc', 'AGHmatrix', 'hglm', 'ggplot2',
+          'boot','reshape2', 'parallel')
+lapply(libs, require, character.only = TRUE)
+
+##### Functions ----
+orderDfGrmMig=function(grm=grm,phen=phen){
+  #make a null dataframe
+  d=NULL
+  #get the ids of the GRM in the order they appear
+  gid=data.table(rownames(grm))
+  d=merge(x=gid,y=phen, 
+               by.x="V1", 
+               by.y='animal',
+               all.x=TRUE,
+               all.y=FALSE)
+
+  # save the dataframe
+  d=d[,c("V1", 'filename', "start", "end", "duration", "log_distance", "log_speed","year", 
+         'age', 'log_hindleg', 'range'), with=FALSE]
+  # get the column names right
+  names(d)=c("animal", 'id', "start", "end", "duration", "log_distance", "log_speed","year", 
+             'age', 'log_hindleg', 'range')
+  
+  # set numeric variables
+  d$start <- as.numeric(d$start)
+  d$end <- as.numeric(d$end)
+  d$duration <- as.numeric(d$duration)
+  d$log_distance <- as.numeric(d$log_distance)
+  d$log_speed <- as.numeric(d$log_speed)
+  d$age <- as.numeric(d$age)
+  d$log_hindleg <- as.numeric(d$log_hindleg)
+  d$range <- as.factor(d$range)
+  d$id <- as.character(d$id)
+  
+  # set character for year
+  d$year <- as.factor(d$year)
+  
+  # make a permanent environmental effects column
+  d$pe <- d$id
+  
+  return(d)
+}
+
+##### Read in the data ----
+# Phenotypes
+mig <- read.csv('input/mig_phenotypes_tf_new_movrate.csv')
+
+# make sure dependent variables are numeric
+str(mig)
+
+# GRMs - less than 90% individual missingness
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm", 
+                        pattern="*.grm.bin", full.names = T)
+
+fileid <- substr(filenames,42,nchar(filenames)-8)
+# get the base name
+grmFileBase <- lapply(filenames, function(x) substr(x,1, nchar(x) - 4))
+# use the read_GRMBin function to read in grms
+GRM_90 <- lapply(grmFileBase, function(x) read_GRMBin(x))
+# make them matrices
+GRM_90.matrix <- lapply(GRM_90, as.matrix)
+names(GRM_90.matrix) <- fileid
+#fix rownames
+rownames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[1]])))
+colnames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[1]])))
+rownames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[2]])))
+colnames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[2]])))
+rownames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[3]])))
+colnames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[3]])))
+
+# Check if it is positive-definite, if not bend it
+is.positive.definite(GRM_90.matrix[[1]])
+
+is.positive.definite(GRM_90.matrix[[2]])
+
+is.positive.definite(GRM_90.matrix[[3]])
+GRM_90.bend_unf=bend(GRM_90.matrix[[3]])
+
+# Inverse
+Ginv_90_nr0.05<-as(solve(GRM_90.matrix[[1]]),"dgCMatrix") 
+
+colnames(Ginv_90_nr0.05)<-rownames(Ginv_90_nr0.05)
+
+Ginv_90_nr0.1<-as(solve(GRM_90.matrix[[2]]),"dgCMatrix") 
+colnames(Ginv_90_nr0.1)<-rownames(Ginv_90_nr0.1)
+
+Ginv_90_unf<-as(solve(GRM_90.bend_unf$bent),"dgCMatrix") 
+colnames(Ginv_90_unf)<-rownames(Ginv_90_unf)
+
+# list the matrices in the corresponding order to the df
+Ginv_90_list <- list()
+Ginv_90_list <- list(Ginv_90_nr0.05, Ginv_90_nr0.1, Ginv_90_unf)
+
+#### Making the models -----
+
+# First make sure everything is in the right order and make a new data frame
+# Use the oderDfGrm function on the list of matrices
+
+# GRM 90
+df_90 <- list()
+df_90 <- lapply(GRM_90.matrix, function(x) orderDfGrmMig(grm = x, phen = mig))
+
+#### Run the models ---
+
+# set priors
+prior <- list(
+  R = list(V=1, nu=0.002), 
+  G = list(G1 = list(V=1, nu=0.002), G2 = list(V = 1, nu = 0.002)))
+
+# start(poisson)
+# make an empty list to store the chains
+grm90_chains_start <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_start <- mclapply(1:4, function(i) {
+    MCMCglmm(start ~ range + age + year, random= ~ id + pe, family = "poisson", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_start[[x]] <- chains_start
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed start model', x, 'of', length(df_90),'\n')
+  
+}
+
+# end (poisson)
+# make an empty list to store the chains
+grm90_chains_end <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_end <- mclapply(1:4, function(i) {
+    MCMCglmm(end ~ range + age + year, random=~ id + pe, family = "poisson", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_end[[x]] <- chains_end
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed end model', x, 'of', length(df_90),'\n')
+  
+}
+
+# duration (poisson)
+# make an empty list to store the chains
+grm90_chains_duration <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_duration <- mclapply(1:4, function(i) {
+    MCMCglmm(duration ~ range + age + log_distance + year, random=~ id + pe, family = "poisson", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_duration[[x]] <- chains_duration
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed duration model', x, 'of', length(df_90),'\n')
+  
+}
+
+# log_speed MIGRATORY
+# make an empty list to store the chains
+grm90_chains_speed_dist <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_speed <- mclapply(1:4, function(i) {
+    MCMCglmm(log_speed2 ~ log_distance + age + year, random=~ id + pe, family = "gaussian", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_speed_dist[[x]] <- chains_speed
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed speed model', x, 'of', length(df_90),'\n')
+  
+}
+
+# log_speed MARCH NON-MIGRATORY
+# make an empty list to store the chains
+grm90_chains_mar_mov <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_mar_mov <- mclapply(1:4, function(i) {
+    MCMCglmm(log_mar_speed ~ age + year, random=~ id + pe, family = "gaussian", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_mar_mov[[x]] <- chains_mar_mov
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed March speed model', x, 'of', length(df_90),'\n')
+  
+}
+
+# log_distance
+# make an empty list to store the chains
+grm90_chains_dist <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_dist <- mclapply(1:4, function(i) {
+    MCMCglmm(log_distance ~ range + age + year, random= ~ id + pe, family = "gaussian", 
+             prior = prior, ginverse = list(animal=Ginv_90_list[[x]]), data = na.omit(df_90[[x]]), nitt = 500000, 
+             burnin = 10000, thin = 100, start=list(QUASI=FALSE), verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_dist[[x]] <- chains_dist
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed distance model', x, 'of', length(df_90),'\n')
+  
+}
+
+save.image(file="mig_update.RData")
+
+#END 
+```
+
+### Migration traits (bivariate model)
+
+```{r}
+# 03 - run bivariate animal models using MCMCglmm
+#input - grm.bin files, phenotype files
+#output - GMCMCglmm  bivariate models
+# following https://diogro.github.io/QGcourse/tutorials/bivariate_animal_model.html
+
+## NOTE: This is run for all 3 of the GRMs filtered based on relatedness: r=0.05, r=0.01, unfiltered
+## r=0.1 is the one we present in the paper
+
+### Packages ----
+libs <- c('dplyr','data.table','plyr','OmicKriging', 'gplots', 'MCMCglmm', 'MasterBayes', 'nadiv',
+          'igraph', 'Matrix', 'gap', 'mbend', 'matrixcalc', 'AGHmatrix', 'hglm', 'ggplot2',
+          'boot','reshape2', 'parallel')
+lapply(libs, require, character.only = TRUE)
+
+##### Functions ----
+orderDfGrmMig=function(grm=grm,phen=phen){
+  #make a null dataframe
+  d=NULL
+  #get the ids of the GRM in the order they appear
+  gid=data.table(rownames(grm))
+  d=merge(x=gid,y=phen, 
+          by.x="V1", 
+          by.y='animal',
+          all.x=TRUE,
+          all.y=FALSE)
+  
+  # save the dataframe
+  d=d[,c("V1", 'filename', "start", "end", "duration", "log_distance", "log_speed2","log_mar_speed","year", 
+         'age', 'log_hindleg', 'range'), with=FALSE]
+  # get the column names right
+  names(d)=c("animal", 'id', "start", "end", "duration", "log_distance", "log_speed2","log_mar_speed","year", 
+             'age', 'log_hindleg', 'range')
+  
+  # set numeric variables
+  d$start <- as.numeric(d$start)
+  d$end <- as.numeric(d$end)
+  d$duration <- as.numeric(d$duration)
+  d$log_distance <- as.numeric(d$log_distance)
+  d$log_speed <- as.numeric(d$log_speed2)
+  d$log_mar_speed <- as.numeric(d$log_mar_speed)
+  d$age <- as.numeric(d$age)
+  d$log_hindleg <- as.numeric(d$log_hindleg)
+  d$range <- as.factor(d$range)
+  d$id <- as.character(d$id)
+  d$animalid <- as.character(d$id)
+  
+  # make a permanent environmental effects column
+  d$pe <- d$id
+  
+  # set character for year
+  d$year <- as.factor(d$year)
+  
+  return(d)
+}
+
+
+##### Read in the data ----
+# Phenotypes
+mig <- read.csv('input/mig_phenotypes_tf_new_movrate.csv')
+
+# make sure dependent variables are numeric
+str(mig)
+
+# GRMs - less than 90% individual missingness
+filenames <- list.files("input/gcta_grm/popmap4r08_90_indrm", 
+                        pattern="*.grm.bin", full.names = T)
+
+fileid <- substr(filenames,42,nchar(filenames)-8)
+# get the base name
+grmFileBase <- lapply(filenames, function(x) substr(x,1, nchar(x) - 4))
+# use the read_GRMBin function to read in grms
+GRM_90 <- lapply(grmFileBase, function(x) read_GRMBin(x))
+# make them matrices
+GRM_90.matrix <- lapply(GRM_90, as.matrix)
+names(GRM_90.matrix) <- fileid
+#fix rownames
+rownames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[1]])))
+colnames(GRM_90.matrix[[1]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[1]])))
+rownames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[2]])))
+colnames(GRM_90.matrix[[2]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[2]])))
+rownames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(rownames(GRM_90.matrix[[3]])))
+colnames(GRM_90.matrix[[3]]) <- gsub("0_","",as.character(colnames(GRM_90.matrix[[3]])))
+
+# Check if it is positive-definite, if not bend it
+is.positive.definite(GRM_90.matrix[[1]])
+
+is.positive.definite(GRM_90.matrix[[2]])
+
+is.positive.definite(GRM_90.matrix[[3]])
+GRM_90.bend_unf=bend(GRM_90.matrix[[3]])
+
+# Inverse
+Ginv_90_nr0.05<-as(solve(GRM_90.matrix[[1]]),"dgCMatrix") 
+
+colnames(Ginv_90_nr0.05)<-rownames(Ginv_90_nr0.05)
+
+Ginv_90_nr0.1<-as(solve(GRM_90.matrix[[2]]),"dgCMatrix") 
+colnames(Ginv_90_nr0.1)<-rownames(Ginv_90_nr0.1)
+
+Ginv_90_unf<-as(solve(GRM_90.bend_unf$bent),"dgCMatrix") 
+colnames(Ginv_90_unf)<-rownames(Ginv_90_unf)
+
+# list the matrices in the corresponding order to the df
+Ginv_90_list <- list()
+Ginv_90_list <- list(Ginv_90_nr0.05, Ginv_90_nr0.1, Ginv_90_unf)
+
+#### Making the models -----
+
+#1. Test for speed-hindleg relationship
+mod_regression<-lm(mig$log_speed2~mig$log_hindleg) # data=voles)
+plot(mig$log_speed2,mig$log_hindleg)               #quick plot in base graphics
+abline(mod_regression)
+
+summary(mod_regression)
+
+#2. Fitting a bivariate model
+
+# First make sure everything is in the right order and make a new data frame
+# Use the oderDfGrm function on the list of matrices
+
+# GRM 90
+df_90 <- list()
+df_90 <- lapply(GRM_90.matrix, function(x) orderDfGrmMig(grm = x, phen = mig))
+
+# set priors
+prior_bi <- list(R = list(V=diag(2), nu=0.002),
+                 G = list(G1 = list(V=diag(2), nu=0.002), G2 = list(V =diag(2), nu = 0.002)))
+
+# make an empty list to store the chains
+grm90_chains_speed_bi <- list()
+
+for (x in 1:length(df_90)){
+  
+  # make the list of 4 chains of mcmc models per one grm
+  chains_speed <- mclapply(1:4, function(i) {
+    MCMCglmm(cbind(log_speed2, log_hindleg) ~ trait + trait:age +trait:year +trait:log_distance-1, 
+             random = ~us(trait):id + us(trait):pe,
+             rcov = ~us(trait):units, family = c("gaussian", "gaussian"),
+             ginverse = list(animal=Ginv_90_list[[x]]),
+             data = na.omit(df_90[[x]]), 
+             prior = prior_bi, 
+             nitt = 500000, burnin = 10000, thin = 100, 
+             start=list(QUASI=FALSE), 
+             verbose=FALSE)
+  }, mc.cores=4)
+  
+  # save the chains to the first spot in the list
+  grm90_chains_speed_bi[[x]] <- chains_speed
+  # name it the name of the df used
+  #names(grm90_chains_weight[x]) <- names(df_90[x])
+  
+  # Tell about progress
+  cat('Completed speed:hindleg model', x, 'of', length(df_90),'\n')
+  
+}
+
+save.image(file="mig_bivariate.RData")
+
+```
+
