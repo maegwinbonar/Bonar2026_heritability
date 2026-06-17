@@ -1,0 +1,641 @@
+---
+title: "RADseq raw data processing"
+author: "Maegwin Bonar"
+date: "2026-06-17"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = FALSE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+
+```
+
+### Introduction
+
+We generated restriction site-associated DNA sequencing (RADseq) libraries using an adapted protocol from Parchman et al. (2012) and Peterson et al. (2012). The libraries were sequenced at The Centre for Applied Genomics (TCAG) in The Hospital for Sick Children (SickKids), Toronto, Canada on an Illumina HiSeq 2500 to produce 2 × 126 base pair paired-end reads.
+
+### Index reference genome
+
+```{bash}
+####### index reference genome -------------------------------------
+
+#input: reference genome
+#output: indexed reference genome
+
+# load modules
+module load bwa
+
+# create symbolic link to reference folder
+#ln -s /home/mpmb38/projects/rrg-shaferab/MAMMAL_GENOMES/odocoileus_virginianus_NEW.fa .
+
+################### bwa index --------------------------------------
+bwa index -a bwtsw odocoileus_virginianus_NEW.fa
+
+#END
+```
+
+### Demultiplex using process_radtags
+
+```{bash}
+####### 01 demulitplex using process_radtags -------------------------------------
+
+#input: fastq.gz files R1 and R2 ${1}_L003_R1_001.fastq.gz ${1}_L003_R2_001.fastq.gz
+#output: four files per barcode, two for the single-end read and two for the paired-end read (eg. sample_ACTCG.1.fq, sample_ACTCG.rem.1.fq, sample_ACTCG.2.fq, sample_ACTCG.rem.2.fq)
+
+################### process_radtag --------------------------------------
+# load modules
+module load stacks
+
+# create symbolic link to fastq files
+#ln -s /home/mpmb38/projects/rrg-shaferab/mpmb38/radseq/SRA_RADseq/*gz .
+
+for f in $(ls Pool3*.gz.md5 | sed 's/Pool3_*.fastq.gz.md5//' | cut -f1-5 -d'_'| uniq)
+do echo ${f}
+mkdir ${f}_samples
+sleep 3
+done
+
+# loop across all filesls b
+for f in $(ls Pool3*.gz.md5 | sed 's/Pool3_*.fastq.gz//' | cut -f1-4 -d'_'| uniq)
+do echo ${f}
+
+process_radtags -1 $f\_L003_R1_001.fastq.gz -2 $f\_L003_R2_001.fastq.gz -o ${f}_samples -b barcodes/${f}_barcodes.txt -e SbfI -E phred33 -r -c -q -i gzfastq
+
+sleep 3
+done
+
+### Make sample directory for Pool2 files
+for f in $(ls Pool2*.gz.md5 | sed 's/Pool2_*.fastq.gz.md5//' | cut -f1-5 -d'_'| uniq)
+do echo ${f}
+mkdir ${f}_samples
+sleep 3
+done
+
+```
+
+Fastqc the files
+
+```{bash}
+
+######## fastqc of all files -------------------------------------
+# load module
+module load fastqc
+
+for f in $(ls Pool2*.gz | sed 's/Pool2_*.fastq.gz//' | cut -f1-5 -d'_'| uniq)
+do echo ${f}
+
+fastqc ${f}_ls samples/*fq.gz -o fastqc_output
+
+sleep 3
+done
+
+
+######## multiqc of all fastqc.zip files -------------------------------------
+#module use /cvmfs/soft.mugqic/CentOS6/modulefiles
+#module load mugqic/MultiQC/1.12
+#multiqc --interactive .
+```
+
+### Adapter removal
+
+```{bash}
+####### 02 trim and adapter removal -------------------------------------
+
+# load modules
+module load trimmomatic/0.39
+
+# make variable for output
+outputdir_Q=trimmed_samples
+
+# loop across all files
+for f in $(ls *.fq.gz | cut -f1 -d'.'| uniq)
+do
+
+echo ${f}
+
+# trim on the paired reads
+java -jar $EBROOTTRIMMOMATIC/trimmomatic-0.39.jar PE -threads 32 ${f}.1.fq.gz \
+${f}.2.fq.gz $outputdir_Q/${f}_paired.1.fq.gz $outputdir_Q/${f}_unpaired.1.fq.gz \
+$outputdir_Q/${f}_paired.2.fq.gz $outputdir_Q/${f}_unpaired.2.fq.gz \
+ILLUMINACLIP:$EBROOTTRIMMOMATIC/adapters/TruSeq3-PE.fa:2:30:10 SLIDINGWINDOW:4:10 MINLEN:100
+
+done
+
+```
+
+Fastqc and check adapters were removed
+
+```{bash}
+###### 02b fastqc again to check adapter removal -------------------------------------
+
+# make output directory for fastqc and multiqc
+# mkdir fastqc_output_trim
+
+######## fastqc of all files -------------------------------------
+# load module
+module load fastqc
+
+fastqc *fq.gz -o fastqc_output_trim
+
+######## multiqc of all fastqc.zip files -------------------------------------
+
+#module load mugqic/MultiQC/1.12
+#multiqc --interactive .
+```
+
+### Map, samtobam, sort, index samples to reference genome
+
+Paired reads
+
+```{bash}
+####### 03a map, samtobam, sort, index samples to reference genome -------------------------------------
+
+#input: paired  reads with adapters removed 1.fq.gz and 2.fq.gz
+#output: mapped, sorted, indexed bam file for paired reads
+
+##### load modules
+module load bwa samtools
+
+##### create symbolic link to reference folder
+#ln -s /home/mpmb38/projects/rrg-shaferab/MAMMAL_GENOMES/odocoileus_virginianus_NEW.fa .
+
+##### make directories for sam and bam files
+# mkdir sam_files
+# mkdir bam_files
+
+### set variables
+ref=/home/mpmb38/scratch
+
+##### call the samples with the for loop
+for f in $(ls *.fq.gz | cut -f1 -d'.'| uniq)
+do
+
+echo ${f}
+
+	################### bwa index --------------------------------------
+	
+	bwa mem -t 32 $ref\/odocoileus_virginianus_NEW.fa trimmed_samples/${f}_paired.1.fq.gz trimmed_samples/${f}_paired.2.fq.gz > sam_files/${f}_paired.sam
+
+	################### sam to bam files --------------------------------------
+
+	samtools view -S -b -@ 32 sam_files/${f}_paired.sam > bam_files/${f}_paired.bam
+	
+	################### sort the bam file --------------------------------------
+
+	samtools sort -@ 32 bam_files/${f}_paired.bam -o bam_files/${f}_sorted_paired.bam
+	
+	################### index the bam file --------------------------------------
+
+	samtools index bam_files/${f}_sorted_paired.bam
+	
+done
+#END
+
+```
+
+Unpaired reads
+
+```{bash}
+####### 03b map, samtobam, sort, index unpaired samples to reference genome -------------------------------------
+
+#input: unpaired reads with adapters removed 1.fq.gz and 2.fq.gz
+#output: mapped, sorted, indexed bam file for unpaired reads
+
+##### load modules
+module load bwa samtools
+
+##### create symbolic link to reference folder
+#ln -s /home/mpmb38/projects/rrg-shaferab/MAMMAL_GENOMES/odocoileus_virginianus_NEW.fa .
+
+##### make directories for sam and bam files
+# mkdir sam_files
+# mkdir bam_files
+
+### set variables
+ref=/home/mpmb38/scratch
+
+##### call the samples with the for loop
+for f in $(ls *.fq.gz | cut -f1 -d'.'| uniq)
+do
+
+echo ${f}
+
+	################### bwa index --------------------------------------
+	
+	bwa mem -t 32 $ref\/odocoileus_virginianus_NEW.fa trimmed_samples/${f}_unpaired.1.fq.gz trimmed_samples/${f}_unpaired.2.fq.gz > sam_files/${f}_unpaired.sam
+
+	################### sam to bam files --------------------------------------
+
+	samtools view -S -b -@ 32 sam_files/${f}_unpaired.sam > bam_files/${f}_unpaired.bam
+	
+	################### sort the bam file --------------------------------------
+
+	samtools sort -@ 32 bam_files/${f}_unpaired.bam -o bam_files/${f}_sorted_unpaired.bam
+	
+	################### index the bam file --------------------------------------
+
+	samtools index bam_files/${f}_sorted_unpaired.bam
+	
+done
+#END
+
+```
+
+### Merge paired and unpaired bam files
+
+```{bash}
+####### 04 merge paired and unpaired bam files then index -------------------------------------
+
+#input: paired and unparied mapped, sorted, indexed bam files
+#output: merged and indexed final bam files
+
+##### load modules
+module load bwa samtools
+
+##### call the samples with the for loop
+for f in $(ls *.fq.gz | cut -f1 -d'.'| uniq)
+do
+
+echo ${f}
+	
+
+	################### merge paired and unpaired bam files --------------------------------------
+	
+	samtools merge bam_files/${f}_final.bam bam_files/${f}_sorted_paired.bam bam_files/${f}_sorted_unpaired.bam
+
+	################### index merged bam files --------------------------------------
+
+	samtools index bam_files/${f}_final.bam
+	
+done
+#END
+
+```
+
+QC
+
+```{bash}
+################### Make nice output from flagstat and coverage and depth qc ---------------------------------
+
+##### coverage
+# Call the ids 
+for i in $(ls *.tsv | sed 's/.tsv//')
+do
+ echo $i
+ # Print scaffold, covered bases, depth, base quality, mapping quality, sample name
+awk -v OFS='\t' 'NR!=1 {print $1, $5, $7, $8, $9 "\t'$i'"}' $i.tsv >$i.tmp
+done
+
+# paste the scaffolds file and all the covered base files together
+cat *tmp > covered_bases.txt
+
+# remove the temp files
+rm -rf *tmp
+
+##### depth
+# Call the ids 
+for i in $(ls *.txt | sed 's/.txt//')
+do
+ echo $i
+ # Print whole depth and sample name
+awk '{print $1 "\t'$i'"}' $i.txt >$i.tmp
+done
+
+# cat the files together
+cat *tmp > whole_depths_tmp.txt
+
+# now transpose it by sample id
+awk '{ rec[$2]=rec[$2] " " $1 }
+END { for (key in rec) print key rec[key] }
+' whole_depths_tmp.txt | sort > whole_depths.txt
+
+# remove the temp files
+rm -rf *tmp
+
+##### flagstat
+# Call the ids 
+for i in $(ls *.tsv | sed 's/.tsv//')
+do
+ echo $i
+ # Print whole depth and sample name
+awk '{print $1 "\t'$i'"}' $i.tsv >$i.tmp
+done
+
+# cat the files together
+cat *tmp > statstmp.txt
+
+# now transpose it by sample id
+awk '{ rec[$2]=rec[$2] " " $1 }
+END { for (key in rec) print key rec[key] }
+' statstmp.txt | sort > stats.txt
+
+# remove the temp files
+rm -rf *tmp
+
+```
+
+
+### Stacks
+
+```{bash}
+####### 05 use gstacks which will read in aligned reads to assemble loci -------------------------------------
+
+#input: bam files and a population map which lists all samples with their population
+#output: aligned and genotyped bam files
+
+##### load modules
+module load nixpkgs/16.09  gcc/7.3.0
+module load stacks/2.3e
+
+##### run gstacks, call final bams and population map
+gstacks -I ./final_bams/ -M ./popmap/population.map2.txt -O ./stacks/ -t 32
+
+#END
+```
+
+### Populations
+
+```{bash}
+####### 06 use populations to get vcf files -------------------------------------
+
+#input: output of gstacks and a population map which lists all samples with their population
+#output: vcf files
+
+##### load modules
+module load nixpkgs/16.09 gcc/7.3.0
+module load stacks/2.3e
+
+##### run gstacks, call final bams and population map
+populations -P ./stacks/ -M ./popmap/population.map4.txt -r 0.80 --min-maf 0.01 --max-obs-het 0.8 --write-single-snp --vcf -O ./populations_map4_r0.8_indrm/ -t 32
+
+#END
+
+#### Remove individuals with missing snps -----------
+
+# First make plink file out of vcf
+plink --vcf populations.snps.vcf --const-fid --make-bed --allow-extra-chr --out popmap4r08_90_indrm
+plink --vcf populations.snps.vcf --const-fid --make-bed --allow-extra-chr --out popmap4r08_90_indrm_may23
+
+# Next recode the bed file with individuals with too much missing data removed
+# 70%
+plink --bfile popmap4r08 --const-fid --allow-extra-chr --mind 0.3 --recode --out cleaned_70
+
+# 90%
+plink --bfile popmap4r08_90_indrm --const-fid --allow-extra-chr --mind 0.1 --recode --out cleaned_90_indrm
+plink --bfile popmap4r08_90_indrm_may23 --const-fid --allow-extra-chr --mind 0.1 --recode --out cleaned_90_indrm
+
+# make a vcf file out of it
+plink --file cleaned_90_indrm --recode vcf --allow-extra-chr --const-fid --out popmap4r08_90_indrm_may23
+
+# 95%
+plink --bfile popmap4r08 --const-fid --allow-extra-chr --mind 0.05 --recode --out cleaned_95
+
+# 99%
+plink --bfile popmap4r08 --const-fid --allow-extra-chr --mind 0.01 --recode --out cleaned_99
+
+```
+
+### Create GRM and filter
+
+```{bash}
+####### 07 create GRM and filter -------------------------------------
+
+#input: vcf file from populations
+#output: GRM unfiltered and with filtering applied
+
+# Software dependancies that need to be in your PATH:cd
+#	 - VCFtools version 0.1.12a
+#	 - PLINK version 1.90(b3.34)
+# 	 - GCTA version 1.92.4
+
+##### Set your objects
+VCF_IN=populations_r0.5/populations.snps.dp.hwe.recode.vcf
+VCF_IN=populations_r0.5/populations.snps.vcf
+VCF_IN=populations_map4_r0.5/populations.snps.dp.hwe.lm.recode.vcf
+OUT_DIR=gcta_grm/filtered_map4_nonimpute
+GRM_CUTOFF="0.05 0.1"
+#INDIV_TO_RM=indiv_to_rm.list
+
+##### Setting of quality filter thresholds
+# Loci missingness filter
+#MAX_MISS="0.7 0.8"
+# Minor allele frequency filter
+#MIN_MAF="0.01 0.05 0.10"
+
+##### Make output directory
+if [[ ! -d $OUT_DIR ]]
+then
+mkdir $OUT_DIR
+else
+    echo $OUT_DIR already exits! >&2 
+fi
+
+#if [[ ! -e $INDIV_TO_RM ]]
+#then 
+#echo "Your indive file list to remove does not exist"
+#exit
+#fi
+
+##### Make a Genomic Relatedness Matrix for the unfiltered dataset
+# Make output directory for all values
+#mkdir $OUT_DIR/unfiltered
+# Make an output object
+#OUT_UNF=$OUT_DIR/unfiltered/unfiltered
+
+#grep "#" $VCF_IN  > $OUT_UNF.vcf
+
+#keep only one SNPs by loci
+#grep -v "#" $VCF_IN | sort -u -k3,3 >> $OUT_UNF.vcf
+
+# sort (needed for tabix)
+#vcf-sort $OUT_UNF.vcf > ${OUT_UNF}_sort.vcf
+
+# Get scaffold numberls rem
+#bgzip ${OUT_UNF}_sort.vcf
+#tabix ${OUT_UNF}_sort.vcf.gz
+#zcat ${OUT_UNF}_sort.vcf.gz | grep -v "^#" | cut -f1 | sort | uniq > scaff_names
+#scaff=`wc -l < scaff_names`
+#echo $scaff
+
+# Generate PLINK binary file set: bed, bim, fam
+plink --file cleaned_90 --const-fid --make-bed --allow-extra-chr --out popmap4r80_90
+# Generate PLINK binary file set: bed, bim, fam
+plink --file cleaned_95 --const-fid --make-bed --allow-extra-chr --out popmap4r80_95
+# Generate PLINK binary file set: bed, bim, fam
+plink --file cleaned_99 --const-fid --make-bed --allow-extra-chr --out popmap4r80_99
+
+plink --file cleaned_90_indrm --const-fid --make-bed --allow-extra-chr --out cleaned_may23
+
+plink --vcf popmap4_r80_90_indrm.recode.vcf --const-fid --make-bed --allow-extra-chr --out popmap4r80_indrm_90
+
+#vcftools --vcf $OUT_UNF.vcf --bed --remove $INDIV_TO_RM --allow-extra-chr --out $OUT_UNF
+
+# Set the bed file
+OUT_UNF=cleaned_may23
+
+# get unique scaffolds
+awk '{print $1}' $OUT_UNF.bim | sort | uniq > $OUT_UNF.id
+# add sequence of numbers
+awk -F, '{print FNR,$0}' 'OFS=\t' $OUT_UNF.id > $OUT_UNF.id.tmp
+mv $OUT_UNF.id.tmp $OUT_UNF.id
+# change every number after 100 to 100
+awk '{print ($1>100)? 100 : $1,$2}' $OUT_UNF.id > $OUT_UNF.id.tmp
+mv $OUT_UNF.id.tmp $OUT_UNF.id
+
+
+# Use the awk find and replace to replace within the .bim file
+awk 'FNR==NR { array[$2]=$1; next } { for (i in array) gsub(i, array[i]) }1' $OUT_UNF.id $OUT_UNF.bim > $OUT_UNF.bim.tmp
+
+# Work around to get rid of scaffold problem (note this was the old technique)
+#awk '{$1="0";print $0}' $OUT_UNF.bim > $OUT_UNF.bim.tmp
+mv $OUT_UNF.bim.tmp $OUT_UNF.bim
+
+#awk '{$1="contig" $1;}1' $OUT_UNF.bim > $OUT_UNF.bim.tmp
+#mv $OUT_UNF.bim.tmp $OUT_UNF.bim
+
+
+# make the GRM without any relatedness cutoff
+#gcta64 --bfile $OUT_UNF --make-grm --autosome --autosome-num 100 --out $OUT_UNF
+# trying with Aidan's version of gcta 1.92.4 to see if the autosome number can be changed to be over 100
+ref=/home/mpmb38/projects/rrg-shaferab/mpmb38/radseq
+$ref/gcta_1.92.4beta2/gcta64 --bfile $OUT_UNF --make-grm --ibc --autosome --autosome-num 100 --out $OUT_UNF
+$ref/gcta_1.92.4beta2/gcta64 --bfile $OUT_UNF --make-grm --autosome --autosome-num 100 --out $OUT_UNF
+
+# make GRM removing highly related individuals
+GRM_CUTOFF="0.05 0.1"
+
+for cut in $GRM_CUTOFF
+do
+	# Make an output object
+	OUT_CUTOFF=${OUT_UNF}_nr_$cut
+	# echo the cutoff value to check
+	echo -e "\n\n### GRM cutoff $cut"
+	# using the unfiltered GRM, create new GRM with related individuals removed according to cutoff values
+	$ref/gcta_1.92.4beta2/gcta64 --grm $OUT_UNF --grm-cutoff $cut --make-grm --autosome --autosome-num 100 --out $OUT_CUTOFF
+done
+
+
+##### Beginning of the filtering procedure 
+
+### 1. Loci missingness filter
+# Loci missingness filter is applied at the vcf file stage
+for miss in $MAX_MISS
+do
+	# Make output directory for all values
+	mkdir $OUT_DIR/lm_$miss
+	
+	# Make an output object
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	# echo the loci missingness 
+	echo -e "\n\n### Max Miss $miss"
+	
+	# Apply filter to recode vcf
+	vcftools --vcf $VCF_IN  --max-missing $miss --out $OUT_MISS --recode
+	
+	#keep only one SNPs by loci
+	grep "#" $OUT_MISS.recode.vcf  > $OUT_MISS.vcf
+	grep -v "#" $OUT_MISS.recode.vcf | sort -u -k3,3 >> $OUT_MISS.vcf
+done 
+
+for miss in $MAX_MISS
+do
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	# Generate PLINK binary file set: bed, bim, fam
+	plink --vcf $OUT_MISS.vcf --const-fid --make-bed --allow-extra-chr --out $OUT_MISS
+done
+
+for miss in $MAX_MISS
+do
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	# get unique scaffolds
+	awk '{print $1}' $OUT_MISS.bim | sort | uniq > $OUT_MISS.id
+	# add sequence of numbers
+	awk -F, '{print FNR,$0}' 'OFS=\t' $OUT_MISS.id > $OUT_MISS.id.tmp
+	mv $OUT_MISS.id.tmp $OUT_MISS.id
+	# change every number after 100 to 100
+	awk '{print ($1>100)? 100 : $1,$2}' $OUT_MISS.id > $OUT_MISS.id.tmp
+	mv $OUT_MISS.id.tmp $OUT_MISS.id
+done
+
+for miss in $MAX_MISS
+do	
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	# Use the awk find and replace to replace within the .bim file
+	awk 'FNR==NR { array[$2]=$1; next } { for (i in array) gsub(i, array[i]) }1' $OUT_MISS.id $OUT_MISS.bim > $OUT_MISS.bim.tmp
+	# Work around to get rid of scaffold problem
+	#awk '{$1="0";print $0}' $OUT_MISS.bim > $OUT_MISS.bim.tmp
+	mv $OUT_MISS.bim.tmp $OUT_MISS.bim
+done
+
+for miss in $MAX_MISS
+do	
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	num=`tail -1 $OUT_MISS.id | awk '{print $1}'`
+	# make the GRM without any relatedness cutoff
+	gcta_1.92.4beta2/gcta64  --bfile $OUT_MISS --make-grm --autosome --autosome-num $num --out $OUT_MISS
+done
+
+for miss in $MAX_MISS
+do	
+	echo $miss
+	OUT_MISS=$OUT_DIR/lm_$miss/lm$miss
+	# make GRM removing highly related individuals
+	for cut in $GRM_CUTOFF
+	do
+		
+		# Make an output object
+		OUT_CUTOFF=${OUT_MISS}_nr_$cut
+		# echo the cutoff value to check
+		echo -e "\n\n### GRM cutoff $cut"
+		# using the unfiltered GRM, create new GRM with related individuals removed according to cutoff values
+		gcta_1.92.4beta2/gcta64 --grm $OUT_MISS --grm-cutoff $cut --make-grm --autosome --autosome-num 100 --out $OUT_CUTOFF
+	done
+done	
+
+### 2. Minimum Allele Frequencies filter
+# Minor allele frequency filter is applied at the GRM creation stage
+	for maf in $MIN_MAF
+	do
+		# Make output directory for all values
+		mkdir $OUT_DIR/lm_$miss/maf_$maf
+		# Make an output object
+		OUT_MAF=$OUT_DIR/lm_$miss/maf_$maf/lm${miss}_maf$maf
+		# echo the minimun allele frequency 
+		echo -e "\n\n\t### Max MAF $maf"
+		
+		# make the GRM without any relatedness cutoff
+		gcta64 --bfile $OUT_MISS --maf $maf --make-grm --out $OUT_MAF
+		
+		# make GRM removing highly related individuals
+		for cut in $GRM_CUTOFF
+		do
+			# Make an output object
+			OUT_CUTOFF=${OUT_MAF}_nr_$cut
+			# echo the cutoff value to check
+			echo -e "\n\n### GRM cutoff $cut"
+			# using the unfiltered GRM, create new GRM with related individuals removed according to cutoff values
+			gcta64 --grm $OUT_MAF --grm-cutoff $cut --make-grm --out $OUT_CUTOFF
+		done
+		
+	# done MAF	
+	done
+# done LM
+done
+
+```
+
